@@ -32,13 +32,11 @@ face_detector = mp_vision.FaceDetector.create_from_options(options)
 # 3. INISIALISASI KAMERA
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # CAP_DSHOW untuk Windows
 
-# --- SET EXPOSURE MANUAL (Anti-Silau) ---
-cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # 0.25 = matikan auto-exposure
-cap.set(cv2.CAP_PROP_EXPOSURE, -4)         # Tuning: -4 (terang) s/d -8 (gelap)
-
-# Verifikasi apakah exposure berhasil di-set
-actual_exposure = cap.get(cv2.CAP_PROP_EXPOSURE)
-print(f"[INFO] Exposure kamera di-set ke: {actual_exposure}")
+# --- BRIGHTNESS SOFTWARE (Universal, tidak bergantung driver kamera) ---
+# alpha = kontras (1.0 normal, 1.5 lebih kontras)
+# beta  = kecerahan tambahan (0 normal, 20 lebih terang)
+BRIGHTNESS_ALPHA = 2.0
+BRIGHTNESS_BETA  = -15000
 
 # --- STRUKTUR DATA TRACKING (Anti-Amnesia / Anti-Jitter) ---
 face_tracker = {}  # Format: {face_id: (center_x, center_y)}
@@ -54,6 +52,9 @@ while True:
     ret, frame = cap.read()
     if not ret:
         break
+
+    # BRIGHTNESS SOFTWARE — diterapkan setiap frame sebelum proses apapun
+    frame = cv2.convertScaleAbs(frame, alpha=BRIGHTNESS_ALPHA, beta=BRIGHTNESS_BETA)
 
     frame_count += 1
     h, w, _ = frame.shape
