@@ -7,14 +7,12 @@ import threading
 from deepface import DeepFace
 import urllib.request
 import numpy as np
-from collections import Counter
 
 # ============================================================
 # KONFIGURASI TARGET AKURASI LOKAL
 # ============================================================
 DB_PATH               = "dataset"
 SCAN_INTERVAL         = 15  # Dipercepat agar scanning lebih responsif
-VOTE_ROUNDS           = 3
 
 # Threshold dilonggarkan maksimal agar toleran di segala kondisi kamar
 CONFIDENCE_THRESHOLD  = 0.20   # Diturunkan agar mudah menerima kecocokan
@@ -75,7 +73,6 @@ face_detector = mp_vision.FaceDetector.create_from_options(options)
 # ============================================================
 # INISIALISASI KAMERA (AUTO-EXPOSURE AKTIF/DEFAULT)
 # ============================================================
-# FIXED: Menghapus semua cap.set manual yang merusak exposure hardware kamera
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -89,29 +86,12 @@ def clean_adaptive_brightness(frame: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     mean_brightness = np.mean(gray)
     
-    # Jika kecerahan rata-rata di bawah standar, lakukan koreksi gamma ringan secara natural
     if mean_brightness < 100:
         gamma = 1.3
         invGamma = 1.0 / gamma
         table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
         return cv2.LUT(frame, table)
     return frame
-
-
-def normalize_face_arcface(face_img: np.ndarray) -> np.ndarray:
-    """
-    Normalisasi wajah yang aman untuk ArcFace.
-    Menghapus proses penajaman (sharpening) ekstrem yang merusak kontur asli wajah.
-    """
-    if face_img is None or face_img.size == 0:
-        return face_img
-    try:
-        # Resize halus menggunakan INTER_AREA / INTER_CUBIC standar
-        img = cv2.resize(face_img, ARCFACE_INPUT_SIZE, interpolation=cv2.INTER_AREA)
-        return img
-    except Exception as e:
-        print(f"[WARN] Gagal melakukan normalisasi wajah: {e}")
-        return face_img
 
 
 def extract_name_from_path(identity_path: str) -> str:
@@ -121,7 +101,6 @@ def extract_name_from_path(identity_path: str) -> str:
         if folder_name.lower() != "dataset":
             return folder_name.upper()
     filename = os.path.splitext(parts[-1])[0]
-    # Bersihkan angka tambahan di belakang nama file jika ada (contoh: ABHINAYA_1 -> ABHINAYA)
     if "_" in filename:
         filename = filename.split("_")[0]
     return filename.upper()
@@ -132,7 +111,6 @@ def distance_to_confidence(distance: float, threshold: float = ARCFACE_DIST_THRE
         return 1.0
     if distance >= threshold:
         return 0.0
-    # Menggunakan fungsi linear terbalik sederhana untuk pemetaan jarak yang konsisten
     confidence = 1.0 - (distance / threshold)
     return round(float(np.clip(confidence, 0.0, 1.0)), 4)
 
@@ -155,7 +133,6 @@ while True:
     if not ret:
         break
 
-    # Jalankan pencerah gambar adaptif ringan
     frame = clean_adaptive_brightness(frame)
     frame_count += 1
     h, w, _ = frame.shape
@@ -211,11 +188,10 @@ while True:
             elif name == "Unknown":
                 color = (0, 0, 255)
             else:
-                color = (0, 255, 0)  # Hijau solid jika berhasil dikenali
+                color = (0, 255, 0)
 
             cv2.rectangle(frame, (xmin, ymin), (xmin + bw, ymin + bh), color, 2)
             
-            # Draw Label info
             lbl = f"{name}"
             if confidence is not None and name != "Unknown":
                 lbl += f" ({int(confidence*100)}%)"
@@ -240,53 +216,38 @@ while True:
                 if face_crop.size == 0:
                     continue
 
-                face_crop = normalize_face_arcface(face_crop)
-                vote_names  = []
-                vote_scores = []
+                try:
+                    # Mengubah detector_backend menjadi 'opencv' agar terjadi kalkulasi alignment posisi mata & hidung yang presisi
+                    df_result = DeepFace.find(
+                        img_path          = face_crop,
+                        db_path           = DB_PATH,
+                        model_name        = "ArcFace",
+                        detector_backend  = "opencv",  
+                        distance_metric   = "cosine",
+                        enforce_detection = False,
+                        silent            = True
+                    )
 
-                for round_idx in range(VOTE_ROUNDS):
-                    try:
-                        df_result = DeepFace.find(
-                            img_path          = face_crop,
-                            db_path           = DB_PATH,
-                            model_name        = "ArcFace",
-                            detector_backend  = "skip",
-                            distance_metric   = "cosine",
-                            enforce_detection = False,
-                            silent            = True
-                        )
+                    if df_result and not df_result[0].empty:
+                        row      = df_result[0].iloc[0]
+                        path     = row["identity"]
+                        dist_col = [c for c in df_result[0].columns if "distance" in c.lower()]
+                        distance = float(row[dist_col[0]]) if dist_col else 0.99
 
-                        if df_result and not df_result[0].empty:
-                            row      = df_result[0].iloc[0]
-                            path     = row["identity"]
-                            dist_col = [c for c in df_result[0].columns if "distance" in c.lower()]
-                            distance = float(row[dist_col[0]]) if dist_col else 0.99
+                        nama = extract_name_from_path(path)
+                        conf = distance_to_confidence(distance, threshold=ARCFACE_DIST_THRESHOLD)
 
-                            nama = extract_name_from_path(path)
-                            conf = distance_to_confidence(distance, threshold=ARCFACE_DIST_THRESHOLD)
+                        print(f"[DEBUG AI] FaceID={fid} -> Terdeteksi: {nama} (Dist Cosine: {distance:.4f})")
 
-                            print(f"[DEBUG AI] FaceID={fid} -> Terdeteksi kemiripan dengan {nama} (Dist Cosine: {distance:.4f})")
-
-                            if conf >= CONFIDENCE_THRESHOLD:
-                                vote_names.append(nama)
-                                vote_scores.append(conf)
-                            else:
-                                vote_names.append("Unknown")
-                                vote_scores.append(0.0)
+                        if conf >= CONFIDENCE_THRESHOLD:
+                            results_map[fid] = {"name": nama, "confidence": conf}
                         else:
-                            vote_names.append("Unknown")
-                            vote_scores.append(0.0)
+                            results_map[fid] = {"name": "Unknown", "confidence": 0.0}
+                    else:
+                        results_map[fid] = {"name": "Unknown", "confidence": 0.0}
 
-                    except Exception as e:
-                        vote_names.append("Unknown")
-                        vote_scores.append(0.0)
-
-                if vote_names:
-                    majority_name = Counter(vote_names).most_common(1)[0][0]
-                    agree_scores  = [s for n, s in zip(vote_names, vote_scores) if n == majority_name]
-                    avg_conf = sum(agree_scores) / len(agree_scores) if agree_scores else 0.0
-                    results_map[fid] = {"name": majority_name, "confidence": avg_conf}
-                else:
+                except Exception as e:
+                    print(f"[WARN AI] Error pengenalan FaceID={fid}: {e}")
                     results_map[fid] = {"name": "Unknown", "confidence": 0.0}
 
             with scan_lock:
