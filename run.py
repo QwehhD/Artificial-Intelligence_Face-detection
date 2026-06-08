@@ -79,7 +79,7 @@ cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)   # Matikan auto-exposure
-cap.set(cv2.CAP_PROP_EXPOSURE, 0)
+cap.set(cv2.CAP_PROP_EXPOSURE, 0)          # FIX: Set exposure manual ke -4 (ubah -5/-6 jika terlalu terang)
 cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)          # Aktifkan autofocus
 
 print(f"[INFO] Exposure kamera: {cap.get(cv2.CAP_PROP_EXPOSURE)}")
@@ -109,6 +109,20 @@ def normalize_face(face_img: np.ndarray) -> np.ndarray:
     except Exception as e:
         print(f"[WARN] Normalisasi gagal: {e}")
     return face_img
+
+
+def increase_brightness(frame: np.ndarray, gamma: float = 2.2) -> np.ndarray:
+    """
+    Naikkan brightness menggunakan Gamma Correction.
+    gamma > 1.0 -> Menghidupkan area gelap (terang)
+    gamma < 1.0 -> Membuat lebih gelap
+    """
+    # Buat tabel pencarian (lookup table) untuk efisiensi performa 60 FPS
+    invGamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+    
+    # Aplikasikan langsung ke frame bgr
+    return cv2.LUT(frame, table)
 
 
 # ============================================================
@@ -195,6 +209,9 @@ while True:
     ret, frame = cap.read()
     if not ret:
         break
+
+    # --- FIX: Naikkan brightness dengan Gamma Correction ---
+    frame = increase_brightness(frame, gamma=1.8)  # Coba rentang 1.5 sampai 2.5
 
     frame_count += 1
     h, w, _ = frame.shape
