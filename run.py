@@ -19,18 +19,48 @@ TRACKER_TOLERANCE_PX = 80   # Batas toleransi pergeseran piksel centroid tracker
 BBOX_PAD_RATIO = 0.20       # Padding bbox 20% untuk tangkap dahi/rahang
 
 # ============================================================
-# DOWNLOAD MODEL MEDIAPIPE (FULL RANGE — lebih presisi)
+# DOWNLOAD MODEL MEDIAPIPE
+# Coba full_range dulu (lebih presisi), fallback ke short_range
 # ============================================================
-MODEL_PATH = "face_detection_full_range.tflite"
-MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/"
-    "face_detector/blaze_face_full_range/float16/1/"
-    "face_detection_full_range.tflite"
-)
-if not os.path.exists(MODEL_PATH):
-    print("[INFO] Mengunduh model MediaPipe face detection (full range)...")
-    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-    print("[INFO] Model berhasil diunduh.")
+MODEL_CANDIDATES = [
+    (
+        "face_detection_full_range.tflite",
+        "https://storage.googleapis.com/mediapipe-models/"
+        "face_detector/blaze_face_full_range/float16/latest/"
+        "face_detection_full_range.tflite",
+        "full range"
+    ),
+    (
+        "blaze_face_short_range.tflite",
+        "https://storage.googleapis.com/mediapipe-models/"
+        "face_detector/blaze_face_short_range/float16/latest/"
+        "blaze_face_short_range.tflite",
+        "short range (fallback)"
+    ),
+]
+
+MODEL_PATH = None
+for _path, _url, _label in MODEL_CANDIDATES:
+    if os.path.exists(_path):
+        MODEL_PATH = _path
+        print(f"[INFO] Menggunakan model lokal: {_path} ({_label})")
+        break
+    print(f"[INFO] Mengunduh model MediaPipe ({_label})...")
+    try:
+        urllib.request.urlretrieve(_url, _path)
+        MODEL_PATH = _path
+        print(f"[INFO] Model berhasil diunduh: {_path}")
+        break
+    except Exception as e:
+        print(f"[WARN] Gagal mengunduh {_label}: {e}")
+
+if MODEL_PATH is None:
+    raise RuntimeError(
+        "[ERROR] Semua model gagal diunduh.\n"
+        "Unduh manual salah satu file berikut lalu letakkan di folder yang sama dengan script:\n"
+        "  https://storage.googleapis.com/mediapipe-models/face_detector/"
+        "blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+    )
 
 # ============================================================
 # INISIALISASI MEDIAPIPE — Full Range, confidence lebih tinggi
@@ -49,7 +79,7 @@ cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)   # Matikan auto-exposure
-cap.set(cv2.CAP_PROP_EXPOSURE, -6)
+cap.set(cv2.CAP_PROP_EXPOSURE, 0)
 cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)          # Aktifkan autofocus
 
 print(f"[INFO] Exposure kamera: {cap.get(cv2.CAP_PROP_EXPOSURE)}")
