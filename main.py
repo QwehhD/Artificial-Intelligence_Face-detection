@@ -4,52 +4,90 @@ import cv2
 import numpy as np
 import face_recognition
 import os
+import requests
+from supabase import create_client, Client
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI(
     title="AI Face Recognition Server",
-    description="API Server Absensi Wajah untuk Next.js Integration"
+    description="API Server Absensi Wajah dengan Integrasi Supabase & Next.js"
 )
 
-# Konfigurasi CORS agar aplikasi Next.js (dari port manapun) bisa menembak API ini
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Pada production, batasi ke URL Next.js kamu
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ============================================================
-# INITIALIZATION: LOADING DATASET WAJAH SECARA CACHING
+# CONFIGURATION: SUPABASE CONFIG
 # ============================================================
-DATASET_PATH = 'dataset'
+# Mengambil kredensial dari Environment Variables (Lokal / Railway env)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://xyz.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "your-anon-key-here")
+BUCKET_NAME = "faces"  # Nama bucket storage di Supabase kamu
+
+# Inisialisasi Klien Supabase
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Array cache di memori server
 known_face_encodings = []
 known_face_names = []
 
-if not os.path.exists(DATASET_PATH):
-    os.makedirs(DATASET_PATH)
-    print(f"[AI SERVER] Folder '{DATASET_PATH}' dibuat. Silakan masukkan template foto wajah.")
-
-print("[AI SERVER] Membaca dataset dan mengekstrak vektor wajah ke memori...")
-for file_name in os.listdir(DATASET_PATH):
-    img_path = os.path.join(DATASET_PATH, file_name)
-    image = cv2.imread(img_path)
+# ============================================================
+# INITIALIZATION: LOADING DATASET DARI SUPABASE STORAGE
+# ============================================================
+print("[AI SERVER] Menghubungkan ke Supabase Storage...")
+try:
+    # 1. List semua file yang ada di dalam bucket storage 'faces'
+    response = supabase.storage.from_(BUCKET_NAME).list()
     
-    if image is None:
-        continue
+    print("[AI SERVER] Mengunduh dataset wajah dan mengekstrak vektor...")
+    for file_info in response:
+        file_name = file_info['name']
         
-    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    encodings = face_recognition.face_encodings(rgb_image)
-    
-    if len(encodings) > 0:
-        known_face_encodings.append(encodings[0])
-        name_id = os.path.splitext(file_name)[0].upper()
-        known_face_names.append(name_id)
-        print(f" -> Terdaftar: {name_id}")
-    else:
-        print(f" -> [WARN] Wajah gagal diekstrak pada file: {file_name}")
+        # Lewati file placeholder bawaan supabase jika ada
+        if file_name == '.emptyFolderPlaceholder' or file_name.startswith('.'):
+            continue
+            
+        # 2. Dapatkan Public URL untuk file tersebut
+        public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(file_name)
+        
+        # 3. Unduh gambar langsung ke memori RAM (Tanpa disimpan ke SSD)
+        img_resp = requests.get(public_url)
+        if img_resp.status_code != 200:
+            print(f" -> [WARN] Gagal mengunduh file: {file_name}")
+            continue
+            
+        # Convert bytes gambar menjadi format OpenCV Matrix
+        nparr = np.frombuffer(img_resp.content, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            continue
+            
+        # 4. Ekstrak vektor wajah menggunakan face_recognition
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        encodings = face_recognition.face_encodings(rgb_image)
+        
+        if len(encodings) > 0:
+            known_face_encodings.append(encodings[0])
+            # Mengambil nama file tanpa ekstensi sebagai ID Nama (Contoh: DIKA.jpg -> DIKA)
+            name_id = os.path.splitext(file_name)[0].upper()
+            known_face_names.append(name_id)
+            print(f" -> Terdaftar dari Cloud: {name_id}")
+        else:
+            print(f" -> [WARN] Wajah gagal diekstrak pada file cloud: {file_name}")
 
-print(f"[AI SERVER] Inisialisasi selesai. Total database lokal: {len(known_face_names)} wajah.")
+    print(f"[AI SERVER] Inisialisasi selesai. Total database cloud: {len(known_face_names)} wajah.")
+
+except Exception as e:
+    print(f"[AI SERVER ERROR] Gagal memuat database dari Supabase: {str(e)}")
+
 
 # ============================================================
 # API ENDPOINT: VERIFIKASI WAJAH / ABSENSI
@@ -57,7 +95,6 @@ print(f"[AI SERVER] Inisialisasi selesai. Total database lokal: {len(known_face_
 @app.post("/api/absent")
 async def absent_verification(file: UploadFile = File(...)):
     try:
-        # 1. Mengubah file gambar kiriman dari Next.js menjadi format OpenCV Matrix
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -65,15 +102,13 @@ async def absent_verification(file: UploadFile = File(...)):
         if frame is None:
             return {"status": "error", "message": "File gambar corrupt atau tidak valid"}
 
-        # 2. Optimasi Skala: Perkecil resolusi ke 0.25x agar inferensi CPU cloud cepat
+        # Optimasi Skala ke 0.25x
         small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
         rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
-        # 3. Deteksi lokasi wajah dan ekstraksi 128-dimensional embedding
         face_locations = face_recognition.face_locations(rgb_small_frame)
         face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
 
-        # Jika tidak ada wajah sama sekali di dalam frame yang dikirim
         if len(face_encodings) == 0:
             return {
                 "status": "success",
@@ -82,7 +117,6 @@ async def absent_verification(file: UploadFile = File(...)):
                 "accuracy": 0.0
             }
 
-        # 4. Proses Klasifikasi Jarak Euclidean (Pencocokan)
         for face_encoding in face_encodings:
             matches = face_recognition.compare_faces(known_face_encodings, face_encoding, tolerance=0.5)
             face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
@@ -102,7 +136,6 @@ async def absent_verification(file: UploadFile = File(...)):
                         "accuracy": round(similarity_percentage, 2)
                     }
 
-        # Jika ada wajah namun tidak cocok dengan yang ada di dataset
         return {
             "status": "success",
             "match": False,
